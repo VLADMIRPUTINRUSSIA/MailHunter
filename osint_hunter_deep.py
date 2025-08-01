@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OSINT Hunter - Deep Targeted Search Engine Scraper
+OSINT Hunter Deep - Extreme Intensive Deep Search Engine Scraper
 MIT License
 Author: OSINT-HQ (2025)
 Description: Terminal-based, Debian-compatible, deep dork search and scraping engine for emails, usernames, names.
@@ -17,9 +17,10 @@ from bs4 import BeautifulSoup
 from rich import print
 from rich.progress import Progress
 import threading
+from urllib.parse import quote
 
 # Constants
-VERSION = "1.1"
+VERSION = "1.2"
 TOOL_NAME = "OSINT Hunter Deep"
 DISCORD_WEBHOOK = "https://discordapp.com/api/webhooks/1400885326670729309/0JVOdlZMDC_Jqm9SoKm9I20iCNSBub1Ocq1c6TiepY0H7-FsfS2rNZC7Eymi-WF2KIJ8"
 
@@ -70,7 +71,7 @@ def extract_links(html):
     links = set()
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
-        if 'http' in href:
+        if href.startswith("http"):
             links.add(href)
     return list(links)
 
@@ -78,17 +79,20 @@ def extract_links(html):
 def rotate_user_agent():
     global HEADERS
     HEADERS = {"User-Agent": random.choice(USER_AGENTS)}
+    print(f"[blue]User-Agent rotated to:[/blue] {HEADERS['User-Agent']}")
 
 
 def search_engine_query(engine, query):
     global query_counter
     if query_counter % 10 == 0:
         rotate_user_agent()
-    url = SEARCH_ENGINES.get(engine, "") + httpx.utils.quote(query)
+    url = SEARCH_ENGINES.get(engine, "") + quote(query)
     try:
         response = httpx.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
             return response.text
+        else:
+            print(f"[yellow]Warning: {engine} returned status code {response.status_code}[/yellow]")
     except Exception as e:
         print(f"[yellow]Warning: {engine} query failed: {e}[/yellow]")
     return ""
@@ -100,12 +104,12 @@ def generate_dork_queries(target):
 
 def save_results(results, target):
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    fname = target.replace('@', '_at_').replace('.', '_')
+    fname = target.replace("@", "_at_").replace(".", "_").replace(" ", "_")
     json_path = f"results_{fname}_{timestamp}.json"
     txt_path = f"results_{fname}_{timestamp}.txt"
-    with open(json_path, 'w') as jf:
+    with open(json_path, "w") as jf:
         json.dump(results, jf, indent=2)
-    with open(txt_path, 'w') as tf:
+    with open(txt_path, "w") as tf:
         for engine, links in results.items():
             tf.write(f"\n=== {engine.upper()} ===\n")
             for link in links:
@@ -116,9 +120,17 @@ def save_results(results, target):
 
 def send_to_discord(path):
     try:
-        with open(path, 'r') as f:
-            content = f.read()[:1900]  # Discord limit
-        httpx.post(DISCORD_WEBHOOK, json={"content": f"**{TOOL_NAME} Results**\nTimestamp: {datetime.utcnow()} UTC\n```{content}```"})
+        with open(path, "r") as f:
+            content = f.read()[:1900]  # Discord message limit
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        data = {
+            "content": f"**{TOOL_NAME} Results**\nTimestamp: {timestamp}\n```{content}```"
+        }
+        response = httpx.post(DISCORD_WEBHOOK, json=data, timeout=10)
+        if response.status_code == 204:
+            print("[green]Results sent to Discord webhook successfully.[/green]")
+        else:
+            print(f"[yellow]Discord webhook returned status {response.status_code}[/yellow]")
     except Exception as e:
         print(f"[red]Discord send error: {e}[/red]")
 
@@ -131,7 +143,7 @@ def scan_target_on_engine(engine, queries, results):
         links = extract_links(html)
         results[engine].extend(links)
         query_counter += 1
-        time.sleep(2)
+        time.sleep(2)  # polite delay
 
 
 def run_scan(target, engines, deep=False, parallel=False):
@@ -155,28 +167,46 @@ def run_scan(target, engines, deep=False, parallel=False):
                     html = search_engine_query(engine, query)
                     links = extract_links(html)
                     results[engine].extend(links)
+                    global query_counter
                     query_counter += 1
                     progress.update(task, advance=1)
-                    time.sleep(2)
+                    time.sleep(2)  # polite delay
 
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description=f"{TOOL_NAME} v{VERSION}")
-    parser.add_argument("--target", required=True, help="Email, username or name to scan")
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="Email, username or name to scan. Can start with '@' to omit user part."
+    )
     parser.add_argument("--deep", action="store_true", help="Enable deep dorking")
     parser.add_argument("--parallel", action="store_true", help="Enable parallel engine search")
-    parser.add_argument("--engines", default="google,duckduckgo,yandex,startpage,mojeek,qwant,brave",
-                        help="Comma-separated list of engines")
+    parser.add_argument(
+        "--engines",
+        default="google,duckduckgo,yandex,startpage,mojeek,qwant,brave",
+        help="Comma-separated list of engines"
+    )
     args = parser.parse_args()
+
+    if not args.target:
+        print("Usage: python3 osint_hunter_deep.py @target.email.extension --deep --parallel")
+        exit(1)
+
+    # If target starts with @, we treat it as just domain+extension and add wildcard user search
+    target = args.target
+    if target.startswith("@"):
+        # e.g. input: @example.com
+        target = f'"{target}"'  # quotes keep it literal in dork searches
 
     engines = [e.strip() for e in args.engines.split(",") if e.strip() in SEARCH_ENGINES]
 
     print(f"[bold blue]{TOOL_NAME} v{VERSION}[/bold blue]")
     print(f"Target: [bold]{args.target}[/bold] | Engines: {len(engines)} | Deep: {args.deep} | Parallel: {args.parallel}")
 
-    results = run_scan(args.target, engines, deep=args.deep, parallel=args.parallel)
+    results = run_scan(target, engines, deep=args.deep, parallel=args.parallel)
     path = save_results(results, args.target)
     send_to_discord(path)
     print("[bold green]Scan complete.[/bold green]")
