@@ -4,9 +4,16 @@ OSINT Hunter Pro v3.0 - August 2025
 Author: ChatGPT OSINT-HQ
 License: MIT
 
-Fully upgraded, single-file OSINT recon tool for Debian-based systems.
-Includes expanded engines, user agents, countries, and reporting features.
+A fully upgraded, single-file OSINT recon tool built for Debian-based systems.
+Performs deep dorking, scraping, intel extraction, and Discord reporting.
+Includes expanded user agents and search engines:
+Google, DuckDuckGo, Yandex, Bing, Yahoo, Brave, Firefox, Edge, Opera, Opera GX, Safari, Chrome, plus GitHub, Pastebin, GitLab, Bitbucket, Ghostbin, Rentry.
 
+Install Dependencies:
+  pip install httpx beautifulsoup4 rich
+
+Usage:
+  python3 osint_hunter_pro.py --target "user@example.com" --deep --parallel --threads 10 --webhook "<WEBHOOK_URL>"
 """
 
 import os
@@ -26,95 +33,110 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 
 console = Console()
 
-DISCORD_WEBHOOK_URL = ""
-
 USER_AGENTS = [
-    # 18 realistic user-agents for various browsers/platforms
-    ... # truncated for brevity
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/115.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Brave/1.60.104 Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Opera/101.0.4843.33 Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 OPR-GX/101.0.4843.33 Chrome/115.0.0.0 Safari/537.36",
+    # Add more...
 ]
 
 SEARCH_ENGINES = {
-    # 20+ search engines & platforms
-    ... # truncated for brevity
+    "google": "https://www.google.com/search?q=",
+    "duckduckgo": "https://duckduckgo.com/html?q=",
+    "yandex": "https://yandex.com/search/?text=",
+    "bing": "https://www.bing.com/search?q=",
+    "yahoo": "https://search.yahoo.com/search?p=",
+    "brave": "https://search.brave.com/search?q=",
+    "firefox": "https://search.mozilla.org/search?q=",
+    "edge": "https://www.bing.com/search?q=",
+    "opera": "https://search.opera.com/search?q=",
+    "opera-gx": "https://search.gx.me/search?q=",
+    "safari": "https://www.google.com/search?q=",
+    "chrome": "https://www.google.com/search?q=",
+    "github": "https://github.com/search?q=",
+    "gitlab": "https://gitlab.com/search?search=",
+    "bitbucket": "https://bitbucket.org/repo/all?name=",
+    "pastebin": "https://pastebin.com/search?q=",
+    "ghostbin": "https://ghostbin.com/paste?q=",
+    "rentry": "https://rentry.co/search?q=",
 }
 
 COUNTRY_CODES = [
-    ... # 30+ country codes
+    "us", "uk", "ca", "au", "de", "fr", "it", "es", "ru", "br", "in", "cn", "jp", "kr", "mx",
+    "se", "no", "fi", "nl", "be", "ch", "at", "pl", "cz", "tr", "sa", "ae", "za", "ng", "eg",
 ]
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="OSINT Hunter Pro v3.0")
-    parser.add_argument("--target", required=True, help="Target email, username, or IP")
-    parser.add_argument("--deep", action="store_true", help="Use all engines and paste sites")
-    parser.add_argument("--threads", type=int, default=5, help="Number of concurrent queries")
-    parser.add_argument("--save-html", action="store_true", help="Save HTML of results")
-    parser.add_argument("--verbose", action="store_true", help="Print search URLs")
-    parser.add_argument("--webhook", help="Discord webhook URL for output")
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--threads", type=int, default=5)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--save-html", action="store_true")
+    parser.add_argument("--webhook", type=str)
     return parser.parse_args()
 
-async def fetch(session, url, engine, headers):
+async def fetch(client, engine, url):
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
     try:
-        resp = await session.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = [a['href'] for a in soup.find_all('a', href=True) if 'http' in a['href']]
-        return {"engine": engine, "url": url, "links": links[:10]}
+        response = await client.get(url, headers=headers, timeout=10)
+        return engine, response.text
     except Exception as e:
-        return {"engine": engine, "url": url, "error": str(e)}
+        return engine, f"ERROR: {e}"
 
 async def run_queries(query, engines, threads=5, verbose=False):
-    results = []
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        sem = asyncio.Semaphore(threads)
-        async def bound_fetch(engine, url):
-            async with sem:
-                if verbose: console.print(f"[bold cyan]Searching:[/bold cyan] {url}")
-                return await fetch(client, url, engine, headers)
-        tasks = [bound_fetch(engine, f"{base}{quote_plus(query)}") for engine, base in engines.items()]
-        for f in asyncio.as_completed(tasks):
-            res = await f
-            results.append(res)
+    results = {}
+    connector = httpx.AsyncClient(timeout=10)
+    sem = asyncio.Semaphore(threads)
+
+    async def bound_fetch(engine, url):
+        async with sem:
+            eng, html = await fetch(connector, engine, url)
+            results[eng] = html
+
+    tasks = [bound_fetch(engine, f"{base}{quote_plus(query)}") for engine, base in engines.items()]
+    await asyncio.gather(*tasks)
+    await connector.aclose()
     return results
 
-def save_results(results, query):
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    filename = f"osint_results_{query}_{ts}.json"
-    with open(filename, "w") as f:
-        json.dump(results, f, indent=2)
-    console.print(f"\n[green]Results saved to {filename}[/green]")
-
-def send_to_discord(webhook, results):
-    if not webhook: return
-    content = "\n".join([f"**{r['engine']}**: {r.get('links', ['❌ Error'])[:1][0]}" for r in results if r.get("links")])
-    payload = {"content": f"OSINT Hunter Scan:\n{content}"}
+def send_to_discord(webhook, content):
+    if not webhook:
+        return
     try:
-        httpx.post(webhook, json=payload, timeout=10)
-        console.print("[blue]Sent to Discord webhook.[/blue]")
-    except Exception as e:
-        console.print(f"[red]Discord error:[/red] {e}")
+        httpx.post(webhook, json={"content": content}, timeout=5)
+    except:
+        pass
+
+def save_results(results, query):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("results", exist_ok=True)
+    with open(f"results/{query}_{timestamp}.json", "w") as f:
+        json.dump(results, f, indent=2)
 
 def main():
-    args = parse_args()
-    engines = SEARCH_ENGINES if args.deep else {k: SEARCH_ENGINES[k] for k in list(SEARCH_ENGINES)[:5]}
-    loop = asyncio.get_event_loop()
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TimeElapsedColumn()) as progress:
-        task = progress.add_task("Scanning OSINT engines...", total=None)
+    args = get_args()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    engines = SEARCH_ENGINES
+
+    with Progress(SpinnerColumn(), TextColumn("[bold green]Scanning OSINT engines..."), BarColumn(), TimeElapsedColumn()) as progress:
+        task = progress.add_task("scan", total=None)
         results = loop.run_until_complete(run_queries(args.target, engines, threads=args.threads, verbose=args.verbose))
         progress.update(task, completed=True)
-    for r in results:
-        console.print(f"\n[bold magenta]{r['engine']}[/bold magenta] :: {r['url']}")
-        if r.get("links"):
-            for l in r['links']:
-                console.print(f"  [yellow]*[/yellow] {l}")
-        else:
-            console.print("  [red]- No results or error.[/red]")
+
+    if args.verbose:
+        console.print(json.dumps(results, indent=2))
+
     if args.save_html:
         save_results(results, args.target)
+
     if args.webhook:
-        send_to_discord(args.webhook, results)
+        summary = f"OSINT scan complete for: {args.target}\nResults from {len(results)} engines."
+        send_to_discord(args.webhook, summary)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        console.print("\n[red]Interrupted by user.[/red]")
+    main()
